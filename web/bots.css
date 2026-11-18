@@ -172,6 +172,13 @@
 .bot-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px 18px;max-width:820px}
 .bot-fields label{display:flex;flex-direction:column;gap:6px;min-width:0;color:var(--hui-secondary);font-size:12px;font-weight:500}
 .bot-fields label small{color:var(--hui-tertiary);font-weight:400;line-height:1.6}
+.bot-platforms{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.bot-fields .bot-platform{flex-direction:row;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--bot-line);border-radius:8px;color:var(--hui-text);font-size:13px;font-weight:400;cursor:pointer;transition:border-color var(--bot-t-hover) var(--bot-ease-ui),background-color var(--bot-t-hover) var(--bot-ease-ui)}
+.bot-fields .bot-platform:has(input:checked){border-color:var(--bot-accent);background:color-mix(in srgb,var(--bot-accent) 7%,var(--bot-surface))}
+.bot-fields .bot-platform:has(input:focus-visible){outline:2px solid var(--bot-focus);outline-offset:2px}
+.bot-platform b{display:block;font-weight:500}
+.bot-fields .bot-platform small{display:block;margin-top:2px}
+.bot-platform-fixed{grid-column:1/-1;display:flex;align-items:center;gap:8px;color:var(--hui-secondary);font-size:12px;font-weight:500}
 .bot-fields .bot-check{flex-direction:row;align-items:center;gap:10px;color:var(--hui-text);font-size:13px;font-weight:400;cursor:pointer}
 #botsContent fieldset{border:0;padding:0;margin:0;min-width:0}
 #botsContent .input{box-sizing:border-box;height:36px;min-height:36px;padding:0 11px;font:400 13px var(--hui-sans)}
@@ -222,6 +229,7 @@
 @keyframes bot-shimmer{to{background-position:-200% 0}}
 
 @media(max-width:680px){
+ .bot-platforms{grid-template-columns:1fr}
  .bot-editor{padding:14px}
  .bot-fields{grid-template-columns:1fr}
  .bot-steps{flex-direction:column;align-items:stretch}.bot-step-track{display:none}

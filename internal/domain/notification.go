@@ -8,10 +8,31 @@ type BotChat struct {
 	Type            string `json:"type"`
 	LastMessageTime string `json:"lastMessageTime,omitempty"`
 }
+
+// Bot platforms. An empty Provider on a stored bot means WeCom, which predates the field.
+// Feishu and Lark share larksuite/cli and differ only in the tenant brand.
+const (
+	BotProviderWeCom  = "wecom"
+	BotProviderFeishu = "feishu"
+	BotProviderLark   = "lark"
+)
+
+// NormalizeBotProvider maps a requested platform to a stored value; ok is false for unknown platforms.
+func NormalizeBotProvider(provider string) (string, bool) {
+	switch provider {
+	case "", BotProviderWeCom:
+		return BotProviderWeCom, true
+	case BotProviderFeishu, BotProviderLark:
+		return provider, true
+	}
+	return "", false
+}
+
 type NotificationBot struct {
 	ID                 string     `json:"id"`
 	ProjectID          string     `json:"projectId"`
 	OwnerID            int64      `json:"ownerId"`
+	Provider           string     `json:"provider,omitempty"`
 	Model              string     `json:"model,omitempty"`
 	Name               string     `json:"name"`
 	BotID              string     `json:"botId"`
@@ -24,6 +45,26 @@ type NotificationBot struct {
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }
+
+// Platform returns the bot's platform, treating bots stored before the field existed as WeCom.
+func (b NotificationBot) Platform() string {
+	if b.Provider == "" {
+		return BotProviderWeCom
+	}
+	return b.Provider
+}
+
+// BotPlatformLabel is the product name shown to users for a platform.
+func BotPlatformLabel(provider string) string {
+	switch provider {
+	case BotProviderFeishu:
+		return "飞书"
+	case BotProviderLark:
+		return "Lark"
+	}
+	return "企业微信"
+}
+
 type NotificationBinding struct {
 	BotID         string   `json:"botId"`
 	Events        []string `json:"events"` // succeeded, failed, waiting

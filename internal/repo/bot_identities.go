@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var ErrBotBindingChallenge = errors.New("绑定请求已失效，请回到企业微信重新发送消息获取链接")
+var ErrBotBindingChallenge = errors.New("绑定请求已失效，请回到聊天中重新向 Bot 发送消息获取链接")
 var ErrBotBindingCode = errors.New("确认码无效、已过期或不属于当前发送者，请重新确认")
 
 func botIdentityID(bot, sender string) string { return BotMessageID(bot, sender) }
@@ -57,7 +57,7 @@ func (r *UsersRepo) NewBotBindingChallenge(bot, sender string, now time.Time) (s
 			return err
 		}
 		if existing.UserID > 0 {
-			return errors.New("当前企业微信账号已绑定，请在个人配置解除后重新绑定")
+			return errors.New("当前聊天账号已绑定，请在个人配置解除后重新绑定")
 		}
 		if err := tx.Model(&domain.BotBindingChallenge{}).Where("binding_id = ? AND status IN ?", id, []string{"pending", "claimed"}).Update("status", "expired").Error; err != nil {
 			return err
@@ -75,9 +75,22 @@ func (r *UsersRepo) BotBindingChallengeStatus(token string, userID int64, now ti
 		return "", ErrBotBindingChallenge
 	}
 	if out.UserID != 0 && out.UserID != userID {
-		return "", errors.New("链接已由其他平台账号确认，请回企业微信重新获取绑定链接")
+		return "", errors.New("链接已由其他平台账号确认，请回到聊天中重新获取绑定链接")
 	}
 	return out.Status, nil
+}
+
+// BotBindingChallengeBot returns the external bot ID a binding link was issued for.
+func (r *UsersRepo) BotBindingChallengeBot(token string) (string, error) {
+	var challenge domain.BotBindingChallenge
+	if err := r.DB.First(&challenge, "id = ?", hexSHA256(token)).Error; err != nil {
+		return "", ErrBotBindingChallenge
+	}
+	var binding domain.BotUserBinding
+	if err := r.DB.First(&binding, "id = ?", challenge.BindingID).Error; err != nil {
+		return "", ErrBotBindingChallenge
+	}
+	return binding.BotID, nil
 }
 func (r *UsersRepo) ClaimBotBindingChallenge(token string, userID int64, now time.Time) (string, error) {
 	if userID <= 0 {
@@ -102,7 +115,7 @@ func (r *UsersRepo) ClaimBotBindingChallenge(token string, userID int64, now tim
 			return ErrBotBindingChallenge
 		}
 		if challenge.UserID != 0 && challenge.UserID != userID {
-			return errors.New("链接已由其他平台账号确认，请回企业微信重新获取绑定链接")
+			return errors.New("链接已由其他平台账号确认，请回到聊天中重新获取绑定链接")
 		}
 		if challenge.Status == "claimed" {
 			return nil

@@ -67,37 +67,12 @@ func (s *socket) streamWithState(ctx context.Context, item domain.BotInteraction
 var errorsStreamUnavailable = errors.New("流式回复不可用")
 
 // progressTurn keeps slow-model and queued work visible in one reply bubble.
-// Status publication is non-blocking so network delays cannot stall model tools.
 func (s *socket) progressTurn(ctx context.Context, item domain.BotInteraction) (context.Context, func()) {
-	updates := make(chan string, 1)
-	publish := func(status string) {
-		select {
-		case updates <- status:
-		default:
-		}
-	}
-	done := make(chan struct{})
-	stopped := make(chan struct{})
-	started := time.Now()
-	go func() {
-		defer close(stopped)
-		phase := "正在理解你的请求"
-		ticker := time.NewTicker(8 * time.Second)
-		defer ticker.Stop()
-		// Initial receipt may already have been sent by the callback reader.
-		_ = s.stream(ctx, item, "已收到，正在处理…", false)
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case phase = <-updates:
-				// The next tick coalesces rapid tool events and bounds update frequency.
-			case <-ticker.C:
-				_ = s.stream(ctx, item, fmt.Sprintf("%s…（已等待 %d 秒）", phase, int(time.Since(started).Seconds())), false)
-			}
-		}
-	}()
-	return context.WithValue(ctx, progressKey{}, publish), func() { close(done); <-stopped }
+	// Initial receipt may already have been sent by the callback reader.
+	go func() { _ = s.stream(ctx, item, "已收到，正在处理…", false) }()
+	return runProgress(ctx, 8*time.Second, func(text string) { _ = s.stream(ctx, item, text, false) })
+}
+
+func progressText(phase string, waited time.Duration) string {
+	return fmt.Sprintf("%s…（已等待 %d 秒）", phase, int(waited.Seconds()))
 }

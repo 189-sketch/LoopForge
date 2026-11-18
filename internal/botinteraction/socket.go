@@ -3,6 +3,7 @@
 package botinteraction
 
 import (
+	"agentflow/internal/domain"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,9 +15,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type ReplyError struct{ Code int }
+// ReplyError is a platform rejection of a reply; the message is marked failed instead of reconnecting.
+type ReplyError struct {
+	Code    int
+	Message string
+}
 
 func (e *ReplyError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
 	return "企业微信拒绝了这次回复，请检查接收会话和 Bot 授权"
 }
 
@@ -193,3 +201,26 @@ func (s *socket) request(ctx context.Context, cmd, id string, body any) error {
 func (s *socket) send(ctx context.Context, chatID, text string) error {
 	return s.request(ctx, "aibot_send_msg", "", map[string]any{"chatid": chatID, "msgtype": "markdown", "markdown": map[string]string{"content": text}})
 }
+
+// The methods below adapt the WeCom socket to channel.
+
+func (s *socket) closed() <-chan struct{} { return s.done }
+func (s *socket) acknowledge(ctx context.Context, item domain.BotInteraction) {
+	state := s.streamState(item.ID)
+	go func() { _ = s.streamWithState(ctx, item, "已收到，正在处理…", false, state) }()
+}
+
+// reply finishes the message's stream bubble, falling back to a plain message.
+func (s *socket) reply(ctx context.Context, item domain.BotInteraction, conv domain.BotConversation, text string) error {
+	if err := s.stream(ctx, item, text, true); err == nil {
+		return nil
+	}
+	return s.send(ctx, conv.ChatID, text)
+}
+func (s *socket) sendCard(ctx context.Context, chatID string, card map[string]any) error {
+	return s.request(ctx, "aibot_send_msg", "", map[string]any{"chatid": chatID, "msgtype": "template_card", "template_card": card})
+}
+func (s *socket) finishActionCard(ctx context.Context, item domain.BotInteraction, result string) error {
+	return s.updateActionCard(ctx, item, result, true)
+}
+func (s *socket) forget(id string) { s.streams.Delete(id) }

@@ -22,6 +22,12 @@ function bindBotModelPicker(host){
 // Project-scoped enterprise chat notifications.
 const botUI={projectId:'',items:[],deliveries:[],selected:null,sessions:[],query:'',loading:false,error:'',busy:false,busyAction:'',revision:0,tab:'list',step:1,recordsTab:'deliveries',interactionBotId:'',interaction:null,interactionLoading:false,interactionError:'',testResult:'',flashId:'',motion:null,animations:[],shownCount:null,shownError:'',watchTimer:0,watchCount:0,deletingId:''};
 const BOT_TABS=['list','edit','records'],BOT_STEPS=[[1,'填写凭据'],[2,'选择接收会话'],[3,'发送测试']],BOT_DEFAULT_MODEL='glm-5.3-flash-ioa';
+// Feishu and Lark both run on larksuite/cli (lark-cli); WeCom uses its AI Bot connection.
+const BOT_PLATFORMS=[['wecom','企业微信','智能机器人'],['feishu','飞书','自建应用机器人 · lark-cli'],['lark','Lark','国际版自建应用 · lark-cli']];
+function botPlatform(bot){return bot?.provider||'wecom'}
+function botPlatformLabel(bot){return (BOT_PLATFORMS.find(([id])=>id===botPlatform(bot))||BOT_PLATFORMS[0])[1]}
+function botIsWeCom(bot){return botPlatform(bot)==='wecom'}
+function botCredentialLabels(bot){return botIsWeCom(bot)?{id:'Bot ID',secret:'Secret'}:{id:'App ID',secret:'App Secret'}}
 // In-progress states breathe; terminal states stay still.
 const BOT_LIVE_STATES=['pending','sending','connecting','reconnecting','queued','running','ready'];
 const BOT_CONNECTION={connected:['已连接','success'],connecting:['连接中','info'],reconnecting:['重连中','info'],error:['连接异常','error'],offline:['未连接','neutral']};
@@ -75,7 +81,7 @@ function botPanelHeadHTML(){
 function botTargetHTML(target){return target?`<span class="bot-target"><span class="bot-chip">${botTypeLabel(target.type)}</span><span class="bot-target-name">${escapeHTML(target.name)}</span></span>`:'<span class="bot-target is-empty">尚未选择接收会话</span>'}
 function botRowHTML(bot){
  const id=escapeHTML(bot.id),name=escapeHTML(bot.name),manage=canManageBot(bot),target=botTargetHTML(bot.target);
- const sub=escapeHTML(bot.model||BOT_DEFAULT_MODEL)+(bot.interactionEnabled?' · 已启用对话':'');
+ const sub=escapeHTML(botPlatformLabel(bot)+' · '+(bot.model||BOT_DEFAULT_MODEL))+(bot.interactionEnabled?' · 已启用对话':'');
  return `<tr data-bot-row="${id}"><td><div class="bot-row-main"><span class="bot-glyph">${botIcon('robot')}</span><span class="bot-row-text"><b class="bot-row-name">${name}</b><small class="bot-row-sub">${sub}</small><small class="bot-row-target">${target}</small></span></div></td><td class="bot-col-target">${target}</td><td>${botEnabledBadge(bot.enabled)}</td><td class="bot-col-sub">${botHealthBadge(bot.health)}</td><td class="bot-col-actions"><div class="bot-row-actions"><button type="button" class="hui-icon-btn" data-bot-edit="${id}" aria-label="编辑 ${name}" title="编辑">${botIcon('edit')}</button>${manage?`<button type="button" class="hui-icon-btn is-danger" data-bot-delete="${id}" aria-label="删除 ${name}" title="删除">${botIcon('trash')}</button>`:''}</div></td></tr>`;
 }
 function botListHTML(items){
@@ -84,8 +90,8 @@ function botListHTML(items){
 }
 function botGuideHTML(){
  const project=typeof currentProject==='function'?currentProject():null;
- const steps=[['① 填写凭据','名称、Bot ID 与 Secret'],['② 选择接收会话','绑定单聊或群聊'],['③ 发送测试','确认消息能送达']];
- return `<div class="bot-guide"><div class="bot-guide-icon">${botIcon('robot')}</div><h2>让任务进展抵达企业微信</h2><p class="muted">还没有机器人。三步完成配置，随后在 SOP 设置或 AI 定时任务中选择这个 Bot。</p><ol>${steps.map(([title,text],i)=>`<li style="--i:${i}"><b>${title}</b><span>${text}</span></li>`).join('')}</ol>${project?.name?`<p class="muted">当前项目：${escapeHTML(project.name)}</p>`:''}<button type="button" class="button primary" data-bot-new ${canCreateBot()?'':'disabled'}>${botIcon('plus')}开始添加</button></div>`;
+ const steps=[['① 填写凭据','选择平台，填写机器人凭据'],['② 选择接收会话','绑定单聊或群聊'],['③ 发送测试','确认消息能送达']];
+ return `<div class="bot-guide"><div class="bot-guide-icon">${botIcon('robot')}</div><h2>让任务进展抵达企业微信、飞书或 Lark</h2><p class="muted">还没有机器人。三步完成配置，随后在 SOP 设置或 AI 定时任务中选择这个 Bot。</p><ol>${steps.map(([title,text],i)=>`<li style="--i:${i}"><b>${title}</b><span>${text}</span></li>`).join('')}</ol>${project?.name?`<p class="muted">当前项目：${escapeHTML(project.name)}</p>`:''}<button type="button" class="button primary" data-bot-new ${canCreateBot()?'':'disabled'}>${botIcon('plus')}开始添加</button></div>`;
 }
 function botStepsHTML(bot,step){
  return `<div class="bot-steps" style="--bot-progress:${(step-1)/2}"><div class="bot-step-track" aria-hidden="true"><i></i></div>${BOT_STEPS.map(([n,label])=>{const done=n!==step&&botStepDone(bot,n);return `<button type="button" class="bot-step${n===step?' active':''}${done?' done':''}" data-bot-step="${n}" ${botStepAllowed(bot,n)&&!botUI.busy?'':'disabled'} ${n===step?'aria-current="step"':''}><span class="bot-step-n">${done?botIcon('check-draw'):n}</span><span class="bot-step-label">${label}</span></button>`}).join('')}</div>`;
@@ -96,12 +102,22 @@ function botEditTabHTML(bot){
  const pane=step===2?botTargetPaneHTML(bot,manage):step===3?botTestPaneHTML(bot,manage):botCredentialPaneHTML(bot,manage);
  return `<div class="bot-editor">${botStepsHTML(bot,step)}<div class="bot-step-fold"><div class="bot-step-pane" data-bot-pane="${step}">${pane}</div></div>${!manage?'<p class="muted bot-hint">仅创建者或项目管理员可修改凭据和接收目标。</p>':''}</div>`;
 }
+// The stored secret belongs to one platform, so the choice is offered only while creating.
+function botPlatformFieldHTML(bot){
+ if(bot.id)return `<div class="bot-platform-fixed"><span>平台</span><span class="bot-chip">${escapeHTML(botPlatformLabel(bot))}</span></div>`;
+ const current=botPlatform(bot);
+ return `<div class="bot-platforms" role="radiogroup" aria-label="平台">${BOT_PLATFORMS.map(([id,label,hint])=>`<label class="bot-platform"><input type="radio" name="provider" value="${id}" ${id===current?'checked':''}><span><b>${label}</b><small>${hint}</small></span></label>`).join('')}</div>`;
+}
 function botCredentialPaneHTML(bot,manage){
- return `<form id="botForm" novalidate><fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-fields"><label>名称<input class="input" name="name" required maxlength="80" value="${escapeHTML(bot.name)}" placeholder="例如：研发进展通知"></label><label>Bot ID<input class="input" name="botId" required maxlength="191" value="${escapeHTML(bot.botId)}" autocomplete="off" placeholder="企业微信智能机器人 Bot ID"></label><label>Secret<input class="input" name="secret" type="password" value="${escapeHTML(bot._secret||'')}" maxlength="512" ${bot.id?'':'required'} autocomplete="new-password" placeholder="${bot.secretConfigured?'已配置 · 留空保留，填写则替换':'填写机器人 Secret'}"></label><label>AI 模型（CodeBuddy）${botModelPickerHTML(bot)}<small class="muted">用于对话和完成汇报；对话使用发送者绑定的平台账号凭据，SOP 汇报使用本次执行者凭据。</small></label><label class="bot-check"><input name="enabled" type="checkbox" role="switch" ${bot.enabled?'checked':''}>启用此 Bot</label><label class="bot-check"><input name="interactionEnabled" type="checkbox" role="switch" ${bot.interactionEnabled?'checked':''}>启用对话（自动执行）</label></div><p class="muted bot-hint">首次对话请按 Bot 提示关联平台账号；新单聊和群聊会自动建立上下文。发送 /new 或“开启新会话”开始新的对话。</p><div class="bot-save-row"><button type="submit" class="button primary">${botBusyLabel('save','','保存并下一步','保存中…')}</button></div></fieldset></form>`;
+ const wecom=botIsWeCom(bot),labels=botCredentialLabels(bot);
+ const idHint=wecom?'企业微信智能机器人 Bot ID':'开发者后台「凭证与基础信息」中的 App ID';
+ const chatHint='首次对话请按 Bot 提示关联平台账号；新单聊和群聊会自动建立上下文。发送 /new 或“开启新会话”开始新的对话。';
+ const hint=wecom?chatHint:`在${botPlatformLabel(bot)}开发者后台为应用添加机器人能力，开通 im:chat:read 与 im:message:send_as_bot 权限并发布版本，再把机器人拉进接收群。启用对话还需在「事件与回调」中选择使用长连接接收事件并订阅「接收消息」，开通 im:message.p2p_msg:readonly 与 im:message.group_at_msg:readonly 权限，并在回调配置中用长连接接收卡片回传交互。${chatHint}`;
+ return `<form id="botForm" novalidate><fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-fields">${botPlatformFieldHTML(bot)}<label>名称<input class="input" name="name" required maxlength="80" value="${escapeHTML(bot.name)}" placeholder="例如：研发进展通知"></label><label>${labels.id}<input class="input" name="botId" required maxlength="191" value="${escapeHTML(bot.botId)}" autocomplete="off" placeholder="${idHint}"></label><label>${labels.secret}<input class="input" name="secret" type="password" value="${escapeHTML(bot._secret||'')}" maxlength="512" ${bot.id?'':'required'} autocomplete="new-password" placeholder="${bot.secretConfigured?'已配置 · 留空保留，填写则替换':`填写机器人 ${labels.secret}`}"></label><label>AI 模型（CodeBuddy）${botModelPickerHTML(bot)}<small class="muted">用于对话和完成汇报；对话使用发送者绑定的平台账号凭据，SOP 汇报使用本次执行者凭据。</small></label><label class="bot-check"><input name="enabled" type="checkbox" role="switch" ${bot.enabled?'checked':''}>启用此 Bot</label><label class="bot-check"><input name="interactionEnabled" type="checkbox" role="switch" ${bot.interactionEnabled?'checked':''}>启用对话（自动执行）</label></div><p class="muted bot-hint">${hint}</p><div class="bot-save-row"><button type="submit" class="button primary">${botBusyLabel('save','','保存并下一步','保存中…')}</button></div></fieldset></form>`;
 }
 function botTargetPaneHTML(bot,manage){
  const changed=!!bot._targetChanged;
- return `<fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-bar"><b>接收会话</b><button type="button" class="button ghost small" id="botRefreshSessions" ${bot.id?'':'disabled'}>${botBusyLabel('sessions','refresh','刷新可发送列表','刷新中…')}</button></div><p class="muted bot-hint">只展示机器人当前可通知的最近会话。找不到目标时，请先在企业微信与 Bot 互动，再刷新。</p><div class="bot-current">${bot.target?`当前目标：<span class="bot-chip">${botTypeLabel(bot.target.type)}</span> ${escapeHTML(bot.target.name)}<button type="button" class="button ghost small" id="botClearTarget">清除目标</button>`:'尚未绑定接收会话'}</div><input class="input" id="botSessionSearch" type="search" placeholder="搜索已获取的联系人或群名" value="${escapeHTML(botUI.query)}"><div id="botSessionList" class="bot-sessions">${botSessionHTML()}</div><div class="bot-save-row"><button type="button" class="button primary" id="botSaveTarget" ${changed||bot.target?'':'disabled'}>${changed?botBusyLabel('target','','保存接收会话','保存中…'):'下一步'}</button></div></fieldset>`;
+ return `<fieldset ${!manage||botUI.busy?'disabled':''}><div class="bot-bar"><b>接收会话</b><button type="button" class="button ghost small" id="botRefreshSessions" ${bot.id?'':'disabled'}>${botBusyLabel('sessions','refresh','刷新可发送列表','刷新中…')}</button></div><p class="muted bot-hint">${botIsWeCom(bot)?'只展示机器人当前可通知的最近会话。找不到目标时，请先在企业微信与 Bot 互动，再刷新。':`只展示机器人已加入的群，${botPlatformLabel(bot)}不允许机器人列出单聊。找不到目标时，请先把机器人拉进群，再刷新。`}</p><div class="bot-current">${bot.target?`当前目标：<span class="bot-chip">${botTypeLabel(bot.target.type)}</span> ${escapeHTML(bot.target.name)}<button type="button" class="button ghost small" id="botClearTarget">清除目标</button>`:'尚未绑定接收会话'}</div><input class="input" id="botSessionSearch" type="search" placeholder="搜索已获取的联系人或群名" value="${escapeHTML(botUI.query)}"><div id="botSessionList" class="bot-sessions">${botSessionHTML()}</div><div class="bot-save-row"><button type="button" class="button primary" id="botSaveTarget" ${changed||bot.target?'':'disabled'}>${changed?botBusyLabel('target','','保存接收会话','保存中…'):'下一步'}</button></div></fieldset>`;
 }
 function botTestPaneHTML(bot,manage){
  const ready=!!(bot.enabled&&bot.target);
@@ -110,7 +126,7 @@ function botTestPaneHTML(bot,manage){
 }
 function botSessionHTML(){
  const chats=filteredBotSessions(botUI.sessions,botUI.query);
- if(!botUI.sessions.length)return '<p class="muted bot-empty">点击刷新获取可发送会话；列表为空时，先与 Bot 互动。</p>';
+ if(!botUI.sessions.length)return `<p class="muted bot-empty">${botIsWeCom(botUI.selected)?'点击刷新获取可发送会话；列表为空时，先与 Bot 互动。':'点击刷新获取机器人所在的群；列表为空时，先把机器人拉进群。'}</p>`;
  if(!chats.length)return '<p class="muted bot-empty">没有匹配的会话，尝试其他名称。</p>';
  return '<span class="bot-session-hl" aria-hidden="true"></span>'+chats.map(chat=>`<label class="bot-session"><input type="radio" name="targetId" value="${escapeHTML(chat.id)}" ${botUI.selected?.target?.id===chat.id?'checked':''}><span><b>${escapeHTML(chat.name||'未命名会话')}</b><small>${escapeHTML(chat.lastMessageTime||'')}</small></span><span class="bot-chip">${botTypeLabel(chat.type)}</span></label>`).join('');
 }
@@ -283,7 +299,7 @@ function botSwitchTab(tab){
 }
 function botOpenEditor(bot){
  if(botUI.busy||(!bot&&!canCreateBot()))return;
- botUI.selected=bot?structuredClone(bot):{name:'',botId:'',enabled:true,projectId:state.projectFilter};
+ botUI.selected=bot?structuredClone(bot):{provider:'wecom',name:'',botId:'',enabled:true,projectId:state.projectFilter};
  Object.assign(botUI,{step:1,sessions:[],query:'',testResult:'',error:''});
  if(botUI.tab==='edit'){botMotion('tab',0);renderBots()}else botSwitchTab('edit');
 }
@@ -315,7 +331,7 @@ function bindBots(host){
  host.querySelector('#botInteractionBot')?.addEventListener('change',event=>{botUI.interactionBotId=event.target.value;botUI.interaction=null;botMotion('entries');loadBotInteractions();renderBots()});
  host.querySelector('#botRefreshInteractions')?.addEventListener('click',()=>{loadBotInteractions();renderBots()});
 }
-function captureBotDraft(host){const form=host.querySelector('#botForm');if(!form||!botUI.selected)return;botUI.selected.name=form.elements.name.value;botUI.selected.botId=form.elements.botId.value;botUI.selected.enabled=form.elements.enabled.checked;botUI.selected.model=form.elements.model.value;botUI.selected.interactionEnabled=form.elements.interactionEnabled.checked;botUI.selected._secret=form.elements.secret.value}
+function captureBotDraft(host){const form=host.querySelector('#botForm'),bot=botUI.selected;if(!form||!bot)return;const provider=form.querySelector('[name="provider"]:checked');if(provider&&!bot.id)bot.provider=provider.value;bot.name=form.elements.name.value;bot.botId=form.elements.botId.value;bot.enabled=form.elements.enabled.checked;bot.model=form.elements.model.value;bot.interactionEnabled=!!form.elements.interactionEnabled?.checked;bot._secret=form.elements.secret.value}
 function botSaveSelected(saved){const index=botUI.items.findIndex(b=>b.id===saved.id);if(index<0)botUI.items.push(saved);else botUI.items[index]=saved;botUI.selected=structuredClone(saved);botUI.error='';nodeBotCache.delete(botUI.projectId)}
 function bindBotEditor(host){
  host.querySelector('#botDelete')?.addEventListener('click',()=>botDelete(botStoredBot(botUI.selected)||botUI.selected,null));
@@ -323,12 +339,15 @@ function bindBotEditor(host){
  if(form){
   bindBotModelPicker(host);
   form.oninput=event=>{event.target.removeAttribute?.('aria-invalid');captureBotDraft(host)};form.onchange=()=>captureBotDraft(host);
+  // Credential labels and setup hints depend on the platform, so a switch re-renders the pane.
+  form.querySelectorAll('[name="provider"]').forEach(el=>el.addEventListener('change',()=>{captureBotDraft(host);renderBots();host.querySelector(`[name="provider"][value="${el.value}"]`)?.focus({preventScroll:true})}));
   form.onsubmit=async event=>{
    event.preventDefault();if(botUI.busy)return;captureBotDraft(host);
    const bot=botUI.selected,projectId=botUI.projectId,revision=botUI.revision,creating=!bot.id;
    const missing=['name','botId',...(creating?['secret']:[])].map(name=>form.elements[name]).filter(input=>!input.value.trim());
-   if(missing.length){botShake(missing);toast(creating?'请填写名称、Bot ID 和 Secret':'请填写名称和 Bot ID','warn');return}
-   const payload={projectId,name:bot.name,botId:bot.botId,enabled:bot.enabled,model:bot.model,interactionEnabled:bot.interactionEnabled,secret:form.elements.secret.value};
+   const labels=botCredentialLabels(bot);
+   if(missing.length){botShake(missing);toast(creating?`请填写名称、${labels.id} 和 ${labels.secret}`:`请填写名称和 ${labels.id}`,'warn');return}
+   const payload={projectId,provider:botPlatform(bot),name:bot.name,botId:bot.botId,enabled:bot.enabled,model:bot.model,interactionEnabled:!!bot.interactionEnabled,secret:form.elements.secret.value};
    if(bot.id&&!payload.secret&&bot.botId===botStoredBot(bot)?.botId&&bot._targetChanged)payload.targetId=bot.target?.id||'';
    if(bot._targetChanged&&(payload.secret||!bot.id)){toast('请先保存凭据，再刷新并选择目标','warn');return}
    botUI.busy=true;botUI.busyAction='save';renderBots();
