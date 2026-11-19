@@ -94,3 +94,39 @@ test('bot pure helpers enforce permissions, filtering, and status labels', async
   assert.match(values.target, /Alice/);
   assert.equal(values.allowed, true);
 });
+
+test('bot editor creates a Feishu bot with App credentials and conversation setup hints', async (t) => {
+  const app = await loadApp();
+  t.after(app.close);
+  app.router.post('/api/notification-bots', (call) => ({
+    id: 'bot-feishu', projectId: 'project-1', ownerId: 'user-1', model: 'glm-5.3-flash-ioa',
+    secretConfigured: true, health: 'unchecked', target: null, ...call.body,
+  }));
+  app.router.get('/api/notification-deliveries', []);
+  app.evaluate(`botUI.projectId=state.projectFilter;botUI.items=[];botUI.loading=false;renderBots();botOpenEditor(null)`);
+  const host = () => app.document.querySelector('#botsContent');
+  assert.ok(host().querySelector('[name="interactionEnabled"]'), 'WeCom is the default platform');
+  const feishu = host().querySelector('[name="provider"][value="feishu"]');
+  feishu.checked = true;
+  feishu.dispatchEvent(new app.window.Event('change', { bubbles: true }));
+  assert.ok(host().querySelector('[name="interactionEnabled"]'), 'Feishu bots can converse');
+  assert.match(host().querySelector('#botForm').textContent, /使用长连接接收事件/);
+  assert.match(host().querySelector('#botForm').textContent, /App ID/);
+  assert.match(host().querySelector('#botForm').textContent, /im:message:send_as_bot/);
+  const form = host().querySelector('#botForm');
+  form.elements.name.value = '飞书通知';
+  form.elements.botId.value = 'cli_app';
+  form.elements.secret.value = 'app-secret';
+  form.elements.interactionEnabled.checked = true;
+  form.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  form.dispatchEvent(new app.window.Event('submit', { bubbles: true, cancelable: true }));
+  await settle(8);
+  const body = app.router.calls.find(c => c.method === 'POST' && c.path === '/api/notification-bots').body;
+  assert.equal(body.provider, 'feishu');
+  assert.equal(body.interactionEnabled, true);
+  assert.equal(app.evaluate(`botUI.step`), 2);
+  assert.match(host().textContent, /只展示机器人已加入的群/);
+  app.evaluate(`botUI.tab='list';renderBots()`);
+  assert.match(host().querySelector('[data-bot-row="bot-feishu"]').textContent, /飞书 · .*已启用对话/);
+  assert.equal(app.evaluate(`botInteractionBots().length`), 1);
+});

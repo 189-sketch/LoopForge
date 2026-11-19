@@ -22,16 +22,18 @@ type Service struct {
 	Generate Generate
 	Action   Action
 	URL      string
-	mu       sync.Mutex
-	running  map[string]*connection
-	Done     chan struct{}
-	start    sync.Once
+	// LarkBinary overrides the lark-cli executable for Feishu/Lark bots.
+	LarkBinary string
+	mu         sync.Mutex
+	running    map[string]*connection
+	Done       chan struct{}
+	start      sync.Once
 }
 type connection struct {
 	bot    domain.NotificationBot
 	cancel context.CancelFunc
 	done   chan struct{}
-	socket *socket
+	live   channel
 }
 
 func randomID() string {
@@ -159,26 +161,28 @@ func (s *Service) run(ctx context.Context, c *connection) {
 			s.state(c.bot, owner, "error", "机器人凭据不可用")
 			return
 		}
-		var ws *socket
-		ws, err = dial(runCtx, s.URL, c.bot.BotID, secret, func(received *socket, f Frame) {
-			s.receive(runCtx, c.bot, f, received)
-		})
+		var ch channel
+		ch, err = s.connect(runCtx, c.bot, secret)
 		if err == nil {
 			s.mu.Lock()
-			c.socket = ws
+			c.live = ch
 			s.mu.Unlock()
 			s.state(c.bot, owner, "connected", "")
-			err = s.process(runCtx, c.bot, owner, ws)
-			ws.close()
+			err = s.process(runCtx, c.bot, owner, ch)
+			ch.close()
 			s.mu.Lock()
-			c.socket = nil
+			c.live = nil
 			s.mu.Unlock()
 			backoff = time.Second
 		}
 		if runCtx.Err() != nil {
 			return
 		}
-		s.state(c.bot, owner, "reconnecting", "连接中断，正在重连")
+		detail := "连接中断，正在重连"
+		if hint := connectHint(err); hint != "" {
+			detail = hint
+		}
+		s.state(c.bot, owner, "reconnecting", detail)
 		timer := time.NewTimer(backoff)
 		select {
 		case <-runCtx.Done():
@@ -190,6 +194,21 @@ func (s *Service) run(ctx context.Context, c *connection) {
 			backoff *= 2
 		}
 	}
+}
+
+// connect opens the platform's long connection for bot.
+func (s *Service) connect(ctx context.Context, bot domain.NotificationBot, secret string) (channel, error) {
+	if bot.Platform() != domain.BotProviderWeCom {
+		return s.dialLark(ctx, bot, secret)
+	}
+	var ws *socket
+	ws, err := dial(ctx, s.URL, bot.BotID, secret, func(received *socket, f Frame) {
+		s.receive(ctx, bot, f, received)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ws, nil
 }
 func (s *Service) state(bot domain.NotificationBot, owner, state, detail string) {
 	_, _ = s.Store.RenewBotConnection(bot.BotID, owner, state, detail, time.Now().UTC())
@@ -266,20 +285,7 @@ func (s *Service) receive(ctx context.Context, bot domain.NotificationBot, f Fra
 			chat = delivery.TargetID
 		}
 	}
-	inserted, err := s.Store.EnqueueBotInteraction(item, kind, chat)
-	if err != nil || !inserted {
-		if err != nil {
-			log.Printf("wecom event enqueue failed action=%s", item.Action)
-		}
-		return
-	}
-	// Card operations are direct engine controls. Reply with the actual result
-	// within the callback window rather than consuming it with a receipt-only update.
-
-	if item.Action == "" {
-		state := ws.streamState(item.ID)
-		go func() { _ = ws.streamWithState(ctx, item, "已收到，正在处理…", false, state) }()
-	}
+	s.accept(ctx, item, kind, chat, ws)
 }
 
 var ErrCardActionDeferred = errors.New("等待账号确认或项目授权")
@@ -296,14 +302,14 @@ func newConversationCommand(content string) bool {
 	}
 	return text == "/new" || text == "开启新会话" || text == "新会话"
 }
-func (s *Service) process(ctx context.Context, bot domain.NotificationBot, owner string, ws *socket) error {
+func (s *Service) process(ctx context.Context, bot domain.NotificationBot, owner string, ws channel) error {
 	ticker := time.NewTicker(300 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ws.done:
+		case <-ws.closed():
 			return errors.New("连接中断")
 		case <-ticker.C:
 		}
@@ -343,7 +349,7 @@ func (s *Service) process(ctx context.Context, bot domain.NotificationBot, owner
 			if err = s.Store.SetBotCardTaskID(item.ID, taskID); err != nil {
 				return err
 			}
-			if err = ws.request(ctx, "aibot_send_msg", "", map[string]any{"chatid": conv.ChatID, "msgtype": "template_card", "template_card": card}); err != nil {
+			if err = ws.sendCard(ctx, conv.ChatID, card); err != nil {
 				var business *ReplyError
 				if errors.As(err, &business) {
 					if err = s.Store.FailBotReply(item.ID, business.Error()); err != nil {
@@ -428,24 +434,21 @@ func (s *Service) process(ctx context.Context, bot domain.NotificationBot, owner
 			item.LastError = detail
 		}
 		if item.Action != "" && item.Action != "notification_details" && item.CardTaskID != "" && item.LastError != ErrCardActionDeferred.Error() {
-			if updateErr := ws.updateActionCard(ctx, *item, item.Reply, true); updateErr != nil {
+			if updateErr := ws.finishActionCard(ctx, *item, item.Reply); updateErr != nil {
 				code := 0
 				var business *ReplyError
 				if errors.As(updateErr, &business) {
 					code = business.Code
 				}
-				log.Printf("wecom action card update failed action=%s code=%d", item.Action, code)
+				log.Printf("bot action card update failed platform=%s action=%s code=%d", bot.Platform(), item.Action, code)
 			}
 		}
 		if item.Action == "" {
-			err = ws.stream(ctx, *item, item.Reply, true)
-			if err != nil {
-				err = ws.send(ctx, conv.ChatID, item.Reply)
-			}
+			err = ws.reply(ctx, *item, conv, item.Reply)
 		} else {
 			err = ws.send(ctx, conv.ChatID, item.Reply)
 		}
-		ws.streams.Delete(item.ID)
+		ws.forget(item.ID)
 		if err != nil {
 			var business *ReplyError
 			if errors.As(err, &business) {

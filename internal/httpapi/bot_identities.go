@@ -61,10 +61,10 @@ func (h *botIdentityHandlers) binding(c *gin.Context) {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(200, gin.H{"status": "claimed", "loginName": user.LoginName, "command": "/bind " + code})
+		c.JSON(200, gin.H{"status": "claimed", "loginName": user.LoginName, "command": "/bind " + code, "platform": h.botBindingPlatform(input.Token)})
 		return
 	}
-	c.JSON(200, gin.H{"status": status, "loginName": user.LoginName})
+	c.JSON(200, gin.H{"status": status, "loginName": user.LoginName, "platform": h.botBindingPlatform(input.Token)})
 }
 func botBindingSameOrigin(c *gin.Context) bool {
 	origin, err := url.Parse(c.GetHeader("Origin"))
@@ -98,6 +98,32 @@ func (h *botIdentityHandlers) remove(c *gin.Context) {
 	}
 	c.Status(204)
 }
+
+// botSenderAccount names the chat account a binding is for, e.g. "企微账号".
+func botSenderAccount(bot domain.NotificationBot) string {
+	if bot.Platform() == domain.BotProviderWeCom {
+		return "企微账号"
+	}
+	return domain.BotPlatformLabel(bot.Platform()) + "账号"
+}
+
+// botBindingPlatform names the platform of the bot a binding link was issued by.
+func (h *botIdentityHandlers) botBindingPlatform(token string) string {
+	botID, err := h.repo.BotBindingChallengeBot(token)
+	if err != nil {
+		return ""
+	}
+	bots, err := h.repo.InteractiveNotificationBots()
+	if err != nil {
+		return ""
+	}
+	for _, bot := range bots {
+		if bot.BotID == botID {
+			return domain.BotPlatformLabel(bot.Platform())
+		}
+	}
+	return ""
+}
 func botIdentityCommand(content string) string {
 	text := strings.TrimSpace(content)
 	if strings.HasPrefix(text, "@") {
@@ -115,7 +141,7 @@ func (h *botIdentityHandlers) message(bot domain.NotificationBot, item domain.Bo
 	if text == "/unbind" || text == "解除绑定" {
 		binding, err := h.repo.BotUserBinding(bot.BotID, item.SenderID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return true, "当前企微账号尚未绑定平台账号。发送“绑定账号”可进行关联。", nil
+			return true, "当前" + botSenderAccount(bot) + "尚未绑定平台账号。发送“绑定账号”可进行关联。", nil
 		}
 		if err != nil {
 			return true, "", err
@@ -123,7 +149,7 @@ func (h *botIdentityHandlers) message(bot domain.NotificationBot, item domain.Bo
 		if err := h.repo.RevokeBotUserBinding(binding.ID, binding.UserID, time.Now().UTC()); err != nil {
 			return true, "", err
 		}
-		return true, "已解除当前企微账号与平台账号的绑定，旧确认码已失效。需要重新关联时，请发送“绑定账号”。", nil
+		return true, "已解除当前" + botSenderAccount(bot) + "与平台账号的绑定，旧确认码已失效。需要重新关联时，请发送“绑定账号”。", nil
 	}
 
 	if strings.HasPrefix(text, "/bind ") {

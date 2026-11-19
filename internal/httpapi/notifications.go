@@ -115,6 +115,7 @@ func (h *notificationHandlers) bot(c *gin.Context) {
 func (h *notificationHandlers) save(c *gin.Context, old *domain.NotificationBot) {
 	var req struct {
 		ProjectID          string  `json:"projectId"`
+		Provider           string  `json:"provider"`
 		Name               string  `json:"name"`
 		BotID              string  `json:"botId"`
 		Secret             string  `json:"secret"`
@@ -133,8 +134,18 @@ func (h *notificationHandlers) save(c *gin.Context, old *domain.NotificationBot)
 		c.JSON(400, gin.H{"error": "请填写有效的名称、Bot ID 和 Secret"})
 		return
 	}
-	bot := domain.NotificationBot{ID: "bot-" + randomID(), ProjectID: strings.TrimSpace(req.ProjectID), Name: req.Name, BotID: req.BotID, Enabled: req.Enabled, Health: "unchecked"}
+	provider, known := domain.NormalizeBotProvider(strings.TrimSpace(req.Provider))
+	if !known {
+		c.JSON(400, gin.H{"error": "请选择有效的机器人平台"})
+		return
+	}
+	bot := domain.NotificationBot{ID: "bot-" + randomID(), ProjectID: strings.TrimSpace(req.ProjectID), Provider: provider, Name: req.Name, BotID: req.BotID, Enabled: req.Enabled, Health: "unchecked"}
 	if old != nil {
+		// The stored secret belongs to one platform, so the platform is fixed once the bot exists.
+		if strings.TrimSpace(req.Provider) != "" && provider != old.Platform() {
+			c.JSON(400, gin.H{"error": "机器人创建后不能更换平台，请新建 Bot"})
+			return
+		}
 		bot = *old
 		bot.Name = req.Name
 		bot.Enabled = req.Enabled
@@ -196,7 +207,7 @@ func (h *notificationHandlers) save(c *gin.Context, old *domain.NotificationBot)
 		}
 		for _, existing := range bots {
 			if existing.BotID == bot.BotID && existing.ID != bot.ID && bot.Enabled {
-				c.JSON(409, gin.H{"error": "这只企业微信 Bot 已在另一个配置中启用对话，请复用原配置"})
+				c.JSON(409, gin.H{"error": "这个 Bot 已在另一个配置中启用对话，请复用原配置"})
 				return
 			}
 		}
@@ -288,10 +299,10 @@ func (h *notificationHandlers) test(c *gin.Context) {
 		status := "failed"
 		var pe *notification.ProviderError
 		if errors.As(err, &pe) {
-			switch pe.Code {
-			case 850003, 853004:
+			switch {
+			case pe.NeedsAuthorization():
 				status = "awaiting_authorization"
-			case 404:
+			case pe.TargetUnavailable():
 				status = "target_unavailable"
 			}
 		}

@@ -98,7 +98,7 @@ func (s *Service) QueueNotificationCard(ctx context.Context, bot domain.Notifica
 			return err
 		}
 		if record.Status == "reply_failed" {
-			return errors.New("企业微信卡片发送失败，请检查会话和 Bot 授权")
+			return errors.New("操作卡片发送失败，请检查会话和 Bot 授权")
 		}
 		if record.Status == "replied" {
 			if record.LastError != "" {
@@ -263,6 +263,16 @@ func cardText(text string, limit int) string {
 	return text
 }
 
+// actionResultTitle names the outcome shown on a handled action card.
+func actionResultTitle(result string) string {
+	switch {
+	case strings.Contains(result, "操作已完成"):
+		return "操作已完成"
+	case strings.Contains(result, "过期"):
+		return "提醒已失效"
+	}
+	return "操作未完成"
+}
 func (s *socket) updateActionCard(ctx context.Context, item domain.BotInteraction, result string, finish bool) error {
 	state := s.streamState(item.ID)
 	state.mu.Lock()
@@ -272,12 +282,7 @@ func (s *socket) updateActionCard(ctx context.Context, item domain.BotInteractio
 	}
 	card := handledCard(item.CardTaskID, "正在处理，请稍候")
 	if finish {
-		title := "操作未完成"
-		if strings.Contains(result, "操作已完成") {
-			title = "操作已完成"
-		} else if strings.Contains(result, "过期") {
-			title = "提醒已失效"
-		}
+		title := actionResultTitle(result)
 		card["main_title"] = map[string]string{"title": title, "desc": cardText(result, 30)}
 		card["sub_title_text"] = cardText(result, 112)
 		card["button_list"] = []map[string]any{{"text": title, "key": "handled", "style": 4}}

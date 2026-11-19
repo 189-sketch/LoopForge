@@ -25,11 +25,36 @@ type Provider interface {
 type ProviderError struct {
 	Code    int
 	Message string
+	// Platform is empty for WeCom; Feishu/Lark errors set it so messages name the right product.
+	Platform string
+	// Auth marks credential or permission failures that need the bot owner to act.
+	Auth bool
 }
 
 func (e *ProviderError) Error() string {
-	return fmt.Sprintf("企业微信错误 %d：%s", e.Code, e.Message)
+	name := "企业微信"
+	switch e.Platform {
+	case domain.BotProviderFeishu:
+		name = "飞书"
+	case domain.BotProviderLark:
+		name = "Lark " // a space separates Latin text from Chinese
+	}
+	if e.Code == 0 {
+		return name + "错误：" + e.Message
+	}
+	return fmt.Sprintf("%s错误 %d：%s", name, e.Code, e.Message)
 }
+
+// NeedsAuthorization reports whether the bot owner must fix credentials or permissions before a retry can succeed.
+func (e *ProviderError) NeedsAuthorization() bool {
+	if e.Auth {
+		return true
+	}
+	return (e.Platform == "" || e.Platform == domain.BotProviderWeCom) && (e.Code == 850003 || e.Code == 853004)
+}
+
+// TargetUnavailable reports whether the configured chat is no longer reachable by the bot.
+func (e *ProviderError) TargetUnavailable() bool { return e.Code == 404 }
 func failure(code int) *ProviderError {
 	message := "请求失败，请检查机器人授权或稍后重试"
 	switch code {

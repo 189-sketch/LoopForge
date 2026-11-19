@@ -59,13 +59,14 @@ func TestBotBindingHTTPRequiresBrowserLoginOriginAndOriginalSender(t *testing.T)
 		t.Fatal(out.Code, out.Body.String())
 	}
 	var data struct {
-		Command string `json:"command"`
-		Login   string `json:"loginName"`
+		Command  string `json:"command"`
+		Login    string `json:"loginName"`
+		Platform string `json:"platform"`
 	}
 	if err = json.Unmarshal(out.Body.Bytes(), &data); err != nil {
 		t.Fatal(err)
 	}
-	if data.Login != "other-user" || !strings.HasPrefix(data.Command, "/bind ") {
+	if data.Login != "other-user" || !strings.HasPrefix(data.Command, "/bind ") || data.Platform != "企业微信" {
 		t.Fatal(out.Body.String())
 	}
 	if _, err = s.BotUserBinding(bot.BotID, "original"); err == nil {
