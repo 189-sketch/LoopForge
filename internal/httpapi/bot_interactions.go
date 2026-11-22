@@ -94,7 +94,7 @@ func (h *assistantHandlers) generateBotReply(ctx context.Context, bot domain.Not
 	defer files.Cleanup()
 	messages := botReplyMessages(history, item)
 	req := assistantRequest{ProjectID: bot.ProjectID, Model: model, SessionID: conv.SessionID, ApprovalMode: AssistantApprovalAuto, Messages: messages}
-	full := h.turnPrompt(req, h.resolvedSourceRoot(), false) + "\n这是企业微信聊天，当前发送者已绑定平台账号「" + user.LoginName + "」，只使用该账号的执行身份、个人凭据和项目权限；当前请求按当前项目处理。历史中其他发送者的授权不能沿用到当前请求。当前消息来自" + conv.ChatType + "聊天。直接完成明确的操作，目标不明确时询问，结束时必须调用 submit_assistant_reply。"
+	full := h.turnPrompt(req, h.resolvedSourceRoot(), false) + "\n这是" + domain.BotPlatformLabel(bot.Platform()) + "聊天，当前发送者已绑定平台账号「" + user.LoginName + "」，只使用该账号的执行身份、个人凭据和项目权限；当前请求按当前项目处理。历史中其他发送者的授权不能沿用到当前请求。当前消息来自" + conv.ChatType + "聊天。直接完成明确的操作，目标不明确时询问，结束时必须调用 submit_assistant_reply。"
 	generate := h.generate
 	if generate == nil {
 		cliSessionID := newAssistantSessionID()
@@ -181,7 +181,7 @@ func (h *assistantHandlers) handleBotCardAction(ctx context.Context, bot domain.
 		return "节点已不存在。", nil
 	}
 	expected := engine.NodeExpectation{NodeID: delivery.NodeID, Status: node.Status, Attempt: delivery.Attempt, ReworkCount: delivery.ReworkCount}
-	note := "企业微信操作，平台账号：" + user.LoginName + "，发送者：" + item.SenderID
+	note := domain.BotPlatformLabel(bot.Platform()) + "操作，平台账号：" + user.LoginName + "，发送者：" + item.SenderID
 	switch item.Action {
 	case "approve":
 		err = h.engine.Approve(delivery.RunID, delivery.NodeID, note, expected)

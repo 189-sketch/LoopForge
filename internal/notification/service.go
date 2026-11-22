@@ -15,8 +15,11 @@ import (
 )
 
 type Service struct {
-	Store          *repo.Store
+	Store *repo.Store
+	// Provider serves WeCom bots; Feishu and Lark bots use their own larksuite/cli providers.
 	Provider       Provider
+	Feishu         Provider
+	Lark           Provider
 	GenerateReport ReportGenerator
 	Interactions   *botinteraction.Service
 	PublicURL      string
@@ -24,7 +27,16 @@ type Service struct {
 
 func New(s *repo.Store) *Service {
 	base := strings.TrimRight(os.Getenv("AGENTFLOW_PUBLIC_URL"), "/")
-	return &Service{Store: s, Provider: NewCLIProvider(), PublicURL: base, Interactions: botinteraction.New(s)}
+	return &Service{Store: s, Provider: NewCLIProvider(), Feishu: NewLarkCLIProvider(domain.BotProviderFeishu), Lark: NewLarkCLIProvider(domain.BotProviderLark), PublicURL: base, Interactions: botinteraction.New(s)}
+}
+func (s *Service) provider(bot domain.NotificationBot) Provider {
+	switch bot.Platform() {
+	case domain.BotProviderFeishu:
+		return s.Feishu
+	case domain.BotProviderLark:
+		return s.Lark
+	}
+	return s.Provider
 }
 func (s *Service) secret(bot domain.NotificationBot) (string, error) {
 	secret, err := s.Store.BotCredential(bot.ID)
@@ -38,12 +50,12 @@ func (s *Service) Sessions(ctx context.Context, bot domain.NotificationBot) ([]d
 	if err != nil {
 		return nil, err
 	}
-	chats, err := s.Provider.Sessions(ctx, bot.BotID, secret)
+	chats, err := s.provider(bot).Sessions(ctx, bot.BotID, secret)
 	health := "ready"
 	if err != nil {
 		health = "error"
 		var pe *ProviderError
-		if errors.As(err, &pe) && (pe.Code == 850003 || pe.Code == 853004) {
+		if errors.As(err, &pe) && pe.NeedsAuthorization() {
 			health = "awaiting_authorization"
 		}
 	}
@@ -75,7 +87,11 @@ func (s *Service) send(ctx context.Context, bot domain.NotificationBot, targetID
 		}
 	}
 	if !found {
-		return &ProviderError{Code: 404, Message: "接收会话当前不可用，请与机器人互动后刷新列表"}
+		message := "接收会话当前不可用，请与机器人互动后刷新列表"
+		if bot.Platform() != domain.BotProviderWeCom {
+			message = "接收群当前不可用，请确认机器人仍在群中后刷新列表"
+		}
+		return &ProviderError{Code: 404, Message: message, Platform: bot.Provider}
 	}
 	secret, err := s.secret(bot)
 	if err != nil {
@@ -93,7 +109,7 @@ func (s *Service) send(ctx context.Context, bot domain.NotificationBot, targetID
 		}
 		return s.Interactions.QueueNotificationCard(ctx, bot, delivery[0], content, detailURL)
 	}
-	return s.Provider.Send(ctx, bot.BotID, secret, targetID, content)
+	return s.provider(bot).Send(ctx, bot.BotID, secret, targetID, content)
 }
 func (s *Service) Start(ctx context.Context) {
 	if s.Interactions != nil {
@@ -224,10 +240,10 @@ func (s *Service) ProcessOne(ctx context.Context) (bool, error) {
 	var pe *ProviderError
 	if errors.As(err, &pe) {
 		detail = pe.Error()
-		switch pe.Code {
-		case 850003, 853004:
+		switch {
+		case pe.NeedsAuthorization():
 			status = "awaiting_authorization"
-		case 404:
+		case pe.TargetUnavailable():
 			status = "target_unavailable"
 		}
 	}
