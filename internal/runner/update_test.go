@@ -163,6 +163,64 @@ func TestGateMCPHelperUpdatesWhileRunnerIdle(t *testing.T) {
 	}
 }
 
+func TestDockerRunnerHelperUpdateRepairsMissingAndStaleBinary(t *testing.T) {
+	const hostBinary, linuxBinary = "current macOS runner", "Linux runner helper"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/runners/agentflow-runner" || r.URL.Query().Get("arch") != runtime.GOARCH {
+			http.NotFound(w, r)
+			return
+		}
+		var payload string
+		switch r.URL.Query().Get("os") {
+		case "darwin":
+			payload = hostBinary
+		case "linux":
+			payload = linuxBinary
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("metadata") == "1" {
+			fmt.Fprintf(w, `{"sha256":"%x"}`, sha256.Sum256([]byte(payload)))
+			return
+		}
+		fmt.Fprint(w, payload)
+	}))
+	defer server.Close()
+	d, err := New(Config{ServerURL: server.URL, BootstrapToken: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	pattern := filepath.Join(binDir, "custom-runner-{os}-{arch}")
+	t.Setenv("AGENTFLOW_RUNNER_BINARY", pattern)
+	binary := filepath.Join(binDir, "agentflow-runner")
+	if err := os.WriteFile(binary, []byte(hostBinary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	helper := filepath.Join(binDir, "custom-runner-linux-"+runtime.GOARCH)
+	for _, state := range []string{"missing", "stale"} {
+		t.Run(state, func(t *testing.T) {
+			if state == "stale" {
+				if err := os.WriteFile(helper, []byte("old helper"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if runtime.GOOS == "darwin" {
+				updated, err := d.installRunnerUpdate(context.Background(), binary)
+				if err != nil || updated {
+					t.Fatalf("helper refresh should not restart the current runner: updated=%v err=%v", updated, err)
+				}
+			} else if err := d.updateDockerRunnerHelper(context.Background(), binary); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(helper); err != nil || string(data) != linuxBinary {
+				t.Fatalf("helper = %q, %v, want %q", data, err, linuxBinary)
+			}
+		})
+	}
+}
+
 func TestRunnerUpdateDefersWhileWorkspaceRequestIsActive(t *testing.T) {
 	const updated = "new runner"
 	hash := sha256.Sum256([]byte(updated))

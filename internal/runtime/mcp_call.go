@@ -176,15 +176,23 @@ func installMCPCallHelperForSandbox(sandbox Sandbox, workspace, dest string) err
 	if err != nil {
 		return err
 	}
-	pattern := strings.TrimSpace(os.Getenv("AGENTFLOW_RUNNER_BINARY"))
-	if !strings.Contains(pattern, "{os}") {
-		pattern = filepath.Join(filepath.Dir(self), "agentflow-runner-{os}-{arch}")
-	}
-	src := strings.NewReplacer("{os}", "linux", "{arch}", goruntime.GOARCH).Replace(pattern)
+	src := DockerRunnerHelperPath(self)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("Docker Git/MCP helper requires a Linux runner binary: set AGENTFLOW_RUNNER_BINARY with {os} and {arch}: %w", err)
 	}
 	return installMCPCallHelperFrom(workspace, src, dest)
+}
+
+// DockerRunnerHelperPath locates the Linux runner used inside Docker on a non-Linux host.
+func DockerRunnerHelperPath(self string) string {
+	pattern := strings.TrimSpace(os.Getenv("AGENTFLOW_RUNNER_BINARY"))
+	if !strings.Contains(pattern, "{os}") {
+		if resolved, err := filepath.EvalSymlinks(self); err == nil {
+			self = resolved
+		}
+		pattern = filepath.Join(filepath.Dir(self), "agentflow-runner-{os}-{arch}")
+	}
+	return strings.NewReplacer("{os}", "linux", "{arch}", goruntime.GOARCH).Replace(pattern)
 }
 
 func installMCPCallHelperFrom(workspace, src, dest string) error {

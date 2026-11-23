@@ -25,7 +25,7 @@
 #   --uninstall            卸载：通知平台注销机器、停止服务、删除全部文件和配置
 #
 # 默认直接从平台下载对应 OS/架构的二进制（由服务端 /runners/agentflow-runner 分发）。
-# 脚本安装 agentflow-runner 和跨沙箱 Gate MCP helper、写配置并启动
+# 脚本安装 agentflow-runner 和 Docker / Gate MCP helper、写配置并启动
 # daemon。Runner 仅向平台发起出站 HTTPS，不开放任何入站端口。
 
 set -euo pipefail
@@ -343,6 +343,7 @@ RUNNER_HOME="${HOME}/.agentflow-runner"
 ENV_FILE="${RUNNER_HOME}/env"
 STATE_FILE="${RUNNER_HOME}/state.json"
 BINARY="${BIN_DIR}/agentflow-runner"
+LINUX_RUNNER_HELPER="${BIN_DIR}/agentflow-runner-linux-${ARCH}"
 GATE_BINARY_PATTERN="${BIN_DIR}/agentflow-gate-mcp-{os}-{arch}"
 PLIST="${HOME}/Library/LaunchAgents/com.agentflow.runner.plist"
 UNIT="${HOME}/.config/systemd/user/agentflow-runner.service"
@@ -421,6 +422,9 @@ if [[ "$UNINSTALL" == "1" ]]; then
     info "已清理 runner Docker 沙箱和临时镜像"
   fi
   rm -f "$BINARY"
+  if [[ "$OS" == "darwin" ]]; then
+    rm -f "$LINUX_RUNNER_HELPER"
+  fi
   rm -f "${BIN_DIR}"/agentflow-gate-mcp-darwin-amd64 \
     "${BIN_DIR}"/agentflow-gate-mcp-darwin-arm64 \
     "${BIN_DIR}"/agentflow-gate-mcp-linux-amd64 \
@@ -538,46 +542,42 @@ esac
 
 # ---------- 1. 安装二进制 ----------
 install_binary() {
+  local target_os="$1" target="$2" url src
   mkdir -p "$BIN_DIR"
   TEMP_BINARY=$(mktemp "${BIN_DIR}/.agentflow-runner.XXXXXX")
-  if [[ -n "$LOCAL_BINARY" ]]; then
+  if [[ "$target_os" == "$OS" && -n "$LOCAL_BINARY" ]]; then
     [[ -f "$LOCAL_BINARY" ]] || fail "本地二进制不存在: $LOCAL_BINARY"
     cp "$LOCAL_BINARY" "$TEMP_BINARY"
-  elif [[ -n "$DOWNLOAD_URL" ]]; then
-    URL="${DOWNLOAD_URL//\{os\}/$OS}"
-    URL="${URL//\{arch\}/$ARCH}"
-    info "从 ${URL} 下载二进制..."
-    curl -fsSL "$URL" -o "$TEMP_BINARY"
+  elif [[ -n "$DOWNLOAD_URL" && ( "$target_os" == "$OS" || "$DOWNLOAD_URL" == *'{os}'* ) ]]; then
+    url="${DOWNLOAD_URL//\{os\}/$target_os}"
+    url="${url//\{arch\}/$ARCH}"
+    info "从 ${url} 下载二进制..."
+    curl -fsSL "$url" -o "$TEMP_BINARY"
   else
-    # 默认：平台直接分发对应 OS/架构的二进制，无需本机 Go 工具链。
-    info "从 ${SERVER} 下载 agentflow-runner（${OS}/${ARCH}）..."
-    if curl -fsSL "${SERVER}/runners/agentflow-runner?os=${OS}&arch=${ARCH}" -o "$TEMP_BINARY"; then
-      :
-    else
+    info "从 ${SERVER} 下载 agentflow-runner（${target_os}/${ARCH}）..."
+    if ! curl -fsSL "${SERVER}/runners/agentflow-runner?os=${target_os}&arch=${ARCH}" -o "$TEMP_BINARY"; then
       # 平台未配置分发：回退到本地源码构建（--source 或当前目录为源码 checkout）。
       AUTO_UPDATE=0
-      SRC="${SOURCE_DIR:-$PWD}"
-      if [[ ! -d "$SRC/cmd/agentflow-runner" ]]; then
-        fail "平台未提供二进制且未找到源码。解决方式任选其一：
-  1) 平台管理员设置 AGENTFLOW_SOURCE_ROOT（源码目录）或 AGENTFLOW_RUNNER_BINARY（预编译产物）后重启服务
-  2) 本命令追加 --source <AgentFlow 源码目录>（需要本机安装 Go）
-  3) 本命令追加 --from <已编译的 agentflow-runner 二进制路径>"
-      fi
-      command -v go >/dev/null 2>&1 || fail "本机未安装 Go，无法从源码构建；请使用 --from 提供二进制"
-      info "从源码 ${SRC} 构建（${OS}/${ARCH}）..."
-      (cd "$SRC" && CGO_ENABLED=0 GOOS="$OS" GOARCH="$ARCH" go build -o "$TEMP_BINARY" ./cmd/agentflow-runner) \
-        || fail "源码构建失败；请检查 Go 版本（需 1.22+）或改用 --from"
+      src="${SOURCE_DIR:-$PWD}"
+      [[ -d "$src/cmd/agentflow-runner" ]] || fail "平台未提供 agentflow-runner ${target_os}/${ARCH} 二进制，且未找到本地源码。请检查平台分发配置或使用 --source"
+      command -v go >/dev/null 2>&1 || fail "本机未安装 Go，无法从源码构建 agentflow-runner ${target_os}/${ARCH}"
+      info "从源码 ${src} 构建（${target_os}/${ARCH}）..."
+      (cd "$src" && CGO_ENABLED=0 GOOS="$target_os" GOARCH="$ARCH" go build -o "$TEMP_BINARY" ./cmd/agentflow-runner) \
+        || fail "源码构建失败（${target_os}/${ARCH}）"
     fi
   fi
-  [[ -s "$TEMP_BINARY" ]] || fail "下载或构建的 runner 二进制为空"
+  [[ -s "$TEMP_BINARY" ]] || fail "下载或构建的 runner 二进制为空（${target_os}/${ARCH}）"
   chmod +x "$TEMP_BINARY"
-  mv -f "$TEMP_BINARY" "$BINARY"
+  mv -f "$TEMP_BINARY" "$target"
   TEMP_BINARY=""
 }
 
 TEMP_BINARY=""
 trap '[[ -z "$TEMP_BINARY" ]] || rm -f "$TEMP_BINARY"' EXIT
-install_binary
+if [[ "$OS" == "darwin" ]]; then
+  install_binary linux "$LINUX_RUNNER_HELPER"
+fi
+install_binary "$OS" "$BINARY"
 
 install_gate_binary() {
   local target_os="$1" target_arch="$2" target

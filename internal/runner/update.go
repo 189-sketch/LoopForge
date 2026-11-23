@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"agentflow/internal/runtime"
 )
 
 // ErrUpdateReady tells the entry point to exec the newly installed binary.
@@ -24,7 +26,7 @@ var ErrUpdateReady = errors.New("runner update ready")
 const maxRunnerBinarySize = 512 << 20
 
 func (d *Daemon) checkUpdatesBeforeClaim(ctx context.Context) {
-	if err := d.checkGateMCPUpdates(ctx); err != nil && ctx.Err() == nil {
+	if err := d.checkGateMCPUpdates(ctx); err != nil && !errors.Is(err, errRunnerUpdateBusy) && ctx.Err() == nil {
 		log.Printf("gate MCP update: %v", err)
 	}
 	binary, err := currentRunnerExecutable()
@@ -44,21 +46,29 @@ func (d *Daemon) checkGateMCPUpdates(ctx context.Context) error {
 	if pattern == "" || atomic.LoadInt32(&d.running) != 0 {
 		return nil
 	}
-	targetOSes := []string{runtime.GOOS}
-	if runtime.GOOS == "darwin" && strings.Contains(pattern, "{os}") {
+	targetOSes := []string{goruntime.GOOS}
+	if goruntime.GOOS == "darwin" && strings.Contains(pattern, "{os}") {
 		targetOSes = append(targetOSes, "linux")
 	}
 	for _, targetOS := range targetOSes {
-		path := strings.ReplaceAll(strings.ReplaceAll(pattern, "{os}", targetOS), "{arch}", runtime.GOARCH)
-		endpoint := fmt.Sprintf("%s/runners/agentflow-gate-mcp?os=%s&arch=%s", d.client.base, targetOS, runtime.GOARCH)
-		if err := d.checkGateMCPUpdate(ctx, endpoint, path); err != nil {
-			return fmt.Errorf("%s/%s: %w", targetOS, runtime.GOARCH, err)
+		path := strings.ReplaceAll(strings.ReplaceAll(pattern, "{os}", targetOS), "{arch}", goruntime.GOARCH)
+		endpoint := fmt.Sprintf("%s/runners/agentflow-gate-mcp?os=%s&arch=%s", d.client.base, targetOS, goruntime.GOARCH)
+		if err := d.updateCompanionBinary(ctx, "gate MCP", endpoint, path); err != nil {
+			return fmt.Errorf("%s/%s: %w", targetOS, goruntime.GOARCH, err)
 		}
 	}
 	return nil
 }
 
-func (d *Daemon) checkGateMCPUpdate(ctx context.Context, endpoint, path string) error {
+func (d *Daemon) updateDockerRunnerHelper(ctx context.Context, binary string) error {
+	endpoint := fmt.Sprintf("%s/runners/agentflow-runner?os=linux&arch=%s", d.client.base, goruntime.GOARCH)
+	if err := d.updateCompanionBinary(ctx, "Docker Git/MCP helper", endpoint, runtime.DockerRunnerHelperPath(binary)); err != nil {
+		return fmt.Errorf("update Docker Git/MCP helper: %w", err)
+	}
+	return nil
+}
+
+func (d *Daemon) updateCompanionBinary(ctx context.Context, name, endpoint, path string) error {
 	metadata, err := runnerBinaryMetadata(ctx, endpoint)
 	if err != nil {
 		return err
@@ -75,22 +85,27 @@ func (d *Daemon) checkGateMCPUpdate(ctx context.Context, endpoint, path string) 
 		return err
 	}
 	defer os.Remove(tmp)
-	d.updateMu.Lock()
+	if !d.updateMu.TryLock() {
+		return errRunnerUpdateBusy
+	}
 	defer d.updateMu.Unlock()
-	if d.updateReady.Load() || atomic.LoadInt32(&d.running) != 0 || ctx.Err() != nil {
-		return nil
+	if d.updateReady.Load() || d.runnerExecutionActive() {
+		return errRunnerUpdateBusy
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	current, err := hashFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if current != localHash {
-		return errors.New("gate MCP executable changed during update")
+		return fmt.Errorf("%s executable changed during update", name)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("replace gate MCP executable: %w", err)
+		return fmt.Errorf("replace %s executable: %w", name, err)
 	}
-	log.Printf("gate MCP update installed (%s) at %s", metadata.SHA256[:12], path)
+	log.Printf("%s update installed (%s) at %s", name, metadata.SHA256[:12], path)
 	return nil
 }
 
@@ -108,7 +123,7 @@ func currentRunnerExecutable() (string, error) {
 var errRunnerUpdateBusy = errors.New("runner is busy")
 
 func (d *Daemon) runnerUpdateEndpoint() string {
-	return fmt.Sprintf("%s/runners/agentflow-runner?os=%s&arch=%s", d.client.base, runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("%s/runners/agentflow-runner?os=%s&arch=%s", d.client.base, goruntime.GOOS, goruntime.GOARCH)
 }
 
 func (d *Daemon) runnerUpdateHashes(ctx context.Context, binary string) (local, expected string, err error) {
@@ -149,6 +164,11 @@ func (d *Daemon) installRunnerUpdate(ctx context.Context, binary string) (bool, 
 	defer d.updateDownloadMu.Unlock()
 	if d.updateReady.Load() {
 		return true, nil
+	}
+	if goruntime.GOOS == "darwin" {
+		if err := d.updateDockerRunnerHelper(ctx, binary); err != nil {
+			return false, err
+		}
 	}
 	localHash, expectedHash, err := d.runnerUpdateHashes(ctx, binary)
 	if err != nil {
